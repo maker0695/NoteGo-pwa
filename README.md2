@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NoteGo - Professional Scheduler</title>
+    <!-- Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom scrollbar for a sleeker look */
+        .custom-scroll::-webkit-scrollbar {
+            width: 8px;
+        }
+        .custom-scroll::-webkit-scrollbar-thumb {
+            background-color: #4B5563; /* Gray-600 */
+            border-radius: 4px;
+        }
+        .custom-scroll::-webkit-scrollbar-track {
+            background: #1F2937; /* Gray-800 */
+        }
+        
+        /* Ensure input fields match the dark theme */
+        input:not([type="checkbox"]), textarea {
+            color: #E5E7EB !important; /* text-gray-200 */
+        }
+        
+        /* Font setup */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 min-h-screen p-4 sm:p-8 flex items-center justify-center">
+
+    <div id="app-card" class="relative w-full max-w-4xl h-[90vh] mx-auto rounded-xl shadow-2xl overflow-hidden bg-gray-800 flex flex-col">
+        <!-- Loading State -->
+        <div id="loading-screen" class="absolute inset-0 flex items-center justify-center bg-gray-900/90 z-50 text-white">
+            <div class="text-center p-8 bg-gray-800 rounded-xl shadow-lg">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                <p class="text-lg text-gray-200">Connecting to secure system...</p>
+            </div>
+        </div>
+
+        <!-- Header Bar (Static) -->
+        <header class="bg-gray-900 text-white p-4 sm:p-6 flex flex-col sm:flex-row justify-between items-center border-b border-gray-700">
+            <h1 class="text-3xl font-extrabold text-blue-500 flex items-center">
+                <!-- Icon: Notebook/List -->
+                <svg class="w-8 h-8 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path>
+                </svg>
+                NoteGo
+            </h1>
+            <div class="flex items-center space-x-4 mt-2 sm:mt-0">
+                <span id="user-info" class="text-sm font-medium text-gray-400"></span>
+                <button id="role-toggle-btn" class="px-3 py-1 text-xs font-semibold rounded-full shadow transition bg-blue-600 text-white hover:bg-blue-700" onclick="toggleRole()">
+                    Switch to Admin
+                </button>
+            </div>
+        </header>
+
+        <!-- Navigation Bar -->
+        <nav id="navbar" class="flex space-x-4 px-6 py-3 bg-gray-800 border-b border-gray-700 sticky top-0 z-20"></nav>
+        
+        <!-- Simulated Notifications/Productivity -->
+        <div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-center flex-wrap gap-3">
+            <button onclick="handleSimulatedAlert('start')" class="px-3 py-1 text-xs bg-gray-700 text-gray-200 rounded-full hover:bg-gray-600 transition">
+                Shift Start Alert
+            </button>
+            <button onclick="handleSimulatedAlert('lunch')" class="px-3 py-1 text-xs bg-gray-700 text-gray-200 rounded-full hover:bg-gray-600 transition">
+                Lunch Alert
+            </button>
+            <button onclick="handleSimulatedAlert('schedule')" class="px-3 py-1 text-xs bg-gray-700 text-gray-200 rounded-full hover:bg-gray-600 transition">
+                Schedule Update
+            </button>
+        </div>
+
+        <!-- Main Content Area -->
+        <div id="content-area" class="flex-grow bg-gray-800 text-gray-200 custom-scroll overflow-y-auto">
+            <!-- Content loaded via JS -->
+        </div>
+
+        <!-- Footer -->
+        <footer class="p-4 bg-gray-900 border-t border-gray-700 text-xs text-gray-500 text-center">
+            <p>**NoteGo** uses Google Firestore for real-time, persistent data storage. User IDs are simplified for demonstration.</p>
+        </footer>
+    </div>
+
+    <!-- Firebase SDK Imports and Core Application Logic -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, orderBy, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- GLOBAL STATE & CONSTANTS ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let db, auth;
+        let currentUserId = null;
+        let currentDisplayName = 'Worker';
+        let isUserWorker = true;
+        let currentView = sessionStorage.getItem('currentView') || 'schedule';
+        let jobsData = [];
+        let selectedJob = JSON.parse(sessionStorage.getItem('selectedJob')) || null;
+
+        const DB_PATHS = {
+            PUBLIC_JOBS: `artifacts/${appId}/public/data/jobs`,
+            PRIVATE_NOTES: (userId) => `artifacts/${appId}/users/${userId}/notes`,
+            PRIVATE_CHECKLIST: (userId) => `artifacts/${appId}/users/${userId}/checklist`,
+            CHAT_MESSAGES: (jobId) => `artifacts/${appId}/public/data/jobs/${jobId}/messages`,
+        };
+
+        const navItems = [
+            { key: 'schedule', label: 'Schedule/Jobs', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>' },
+            { key: 'notes', label: 'Notes', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>' },
+            { key: 'checklist', label: 'Checklist', icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>' },
+        ];
+
+        // --- UTILITY FUNCTIONS ---
+        window.handleSimulatedAlert = (type) => {
+            let message = '';
+            if (type === 'start') {
+                message = "⚠️ Shift Start Reminder: Your shift is starting now!";
+            } else if (type === 'lunch') {
+                message = "🍕 Lunch Break Alert! Don't forget to log your hour.";
+            } else if (type === 'schedule') {
+                message = "📅 New Schedule Delivered: Check the Schedule view.";
+            }
+            alert(message); // Using alert() for this simulation feature
+        };
+
+        window.toggleRole = () => {
+            isUserWorker = !isUserWorker;
+            currentDisplayName = isUserWorker ? 'Worker' : 'Admin';
+            renderApp();
+            renderContent();
+        };
+        
+        window.changeView = (newView) => {
+            currentView = newView;
+            selectedJob = null;
+            sessionStorage.setItem('currentView', newView);
+            sessionStorage.removeItem('selectedJob');
+            renderContent();
+        };
+
+        const getInitials = (name) => {
+            if (!name) return 'U';
+            const parts = name.split(' ');
+            if (parts.length > 1) {
+                return (parts[0][0] + parts[1][0]).toUpperCase();
+            }
+            return name[0].toUpperCase();
+        };
+
+        // --- RENDER FUNCTIONS ---
+
+        const renderApp = () => {
+            document.getElementById('loading-screen').classList.add('hidden');
+            
+            // 1. Update User Info/Role Button
+            document.getElementById('user-info').innerHTML = `Logged in as: <strong class="text-white">${currentDisplayName} (ID: ${currentUserId.substring(0, 8)}...)</strong>`;
+            const roleBtn = document.getElementById('role-toggle-btn');
+            roleBtn.textContent = `Switch to ${isUserWorker ? 'Admin' : 'Worker'}`;
+            roleBtn.className = `px-3 py-1 text-xs font-semibold rounded-full shadow transition ${isUserWorker ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-gray-600 text-white hover:bg-gray-700'}`;
+
+            // 2. Render Navigation
+            const navbar = document.getElementById('navbar');
+            navbar.innerHTML = navItems.map(item => `
+                <button
+                    onclick="changeView('${item.key}')"
+                    class="flex items-center px-4 py-2 text-lg font-semibold rounded-md transition-colors duration-200 ${
+                        currentView === item.key
+                            ? 'bg-blue-600 text-white shadow-md'
+                            : 'text-gray-400 hover:bg-gray-700 hover:text-white'
+                    }"
+                >
+                    ${item.icon} <span class="hidden sm:inline ml-2">${item.label}</span>
+                </button>
+            `).join('');
+            
+            // 3. Render Content Area
+            renderContent();
+        };
+
+        const renderContent = () => {
+            const contentArea = document.getElementById('content-area');
+            contentArea.innerHTML = '';
+            
+            if (selectedJob && currentView === 'chat') {
+                renderChatView(contentArea);
+                return;
+            }
+
+            switch (currentView) {
+                case 'schedule':
+                    renderScheduleView(contentArea);
+                    break;
+                case 'notes':
+                    renderNotesView(contentArea);
+                    break;
+                case 'checklist':
+                    renderChecklistView(contentArea);
+                    break;
+                default:
+                    renderScheduleView(contentArea);
+            }
+        };
+
+        // --- 1. SCHEDULE/JOB VIEW ---
+
+        const renderJobCard = (job) => {
+            const isAssigned = job.workerId === currentUserId;
+            
+            if (isUserWorker && !isAssigned) {
+                return '';
+            }
+            
+            const statusColor = job.status === 'Scheduled' ? 'bg-blue-700 text-blue-100' : 
+                                job.status === 'Completed' ? 'bg-green-700 text-green-100' :
+                                'bg-gray-700 text-gray-100';
+
+            return `
+                <div class="p-4 border border-gray-700 rounded-lg shadow-md hover:shadow-lg transition duration-200 bg-gray-900">
+                    <div class="flex justify-between items-start mb-2">
+                        <h3 class="text-xl font-bold text-white">${job.name}</h3>
+                        <span class="text-xs font-semibold px-3 py-1 rounded-full ${statusColor}">
+                            ${job.status}
+                        </span>
+                    </div>
+                    <p class="text-sm text-gray-400 mb-1">
+                        <strong class="font-semibold text-gray-200">Client:</strong> ${job.client}
+                    </p>
+                    <p class="text-sm text-gray-400 mb-1">
+                        <strong class="font-semibold text-gray-200">Date/Time:</strong> ${job.shiftDate} @ ${job.shiftTime}
+                    </p>
+                    <p class="text-sm text-gray-400 mb-4">
+                        <strong class="font-semibold text-gray-200">Duty:</strong> ${job.description}
+                    </p>
+                    <button 
+                        onclick="window.selectJob(${JSON.stringify(job).replace(/"/g, '&quot;')})"
+                        class="bg-blue-600 text-white text-sm font-semibold px-4 py-2 rounded-md shadow-md hover:bg-blue-700 transition duration-150"
+                    >
+                        View Details & Chat
+                    </button>
+                </div>
+            `;
+        };
+
+        window.selectJob = (job) => {
+            selectedJob = job;
+            sessionStorage.setItem('selectedJob', JSON.stringify(job));
+            currentView = 'chat';
+            renderContent();
+        };
+
+        const renderJobCreationForm = () => {
+            if (isUserWorker) return '';
+
+            return `
+                <div class="p-4 bg-gray-900 rounded-lg shadow-md mt-4">
+                    <h3 class="text-xl font-bold mb-4 text-white">➕ Create New Shift</h3>
+                    <form id="job-creation-form" class="space-y-4">
+                        <input type="text" name="name" placeholder="Job Name (e.g., Q3 Audit)" required class="w-full p-2 border border-gray-600 rounded-md focus:ring-blue-500 focus:border-blue-500 bg-gray-700 text-gray-200" value="New Project">
+                        <input type="text" name="client" placeholder="Client/Project" required class="w-full p-2 border border-gray-600 rounded-md focus:ring-blue-500 focus:border-blue-500 bg-gray-700 text-gray-200" value="New Client">
+                        <div class="flex gap-4">
+                            <input type="date" name="shiftDate" required class="flex-1 p-2 border border-gray-600 rounded-md focus:ring-blue-500 focus:border-blue-500 bg-gray-700 text-gray-200" value="${new Date().toISOString().slice(0, 10)}">
+                            <input type="text" name="shiftTime" placeholder="Time (e.g., 9:00 AM - 5:00 PM)" required class="flex-1 p-2 border border-gray-600 rounded-md focus:ring-blue-500 focus:border-blue-500 bg-gray-700 text-gray-200" value="9:00 AM - 5:00 PM">
+                        </div>
+                        <textarea name="description" placeholder="Brief shift description/tasks" rows="3" class="w-full p-2 border border-gray-600 rounded-md focus:ring-blue-500 focus:border-blue-500 bg-gray-700 text-gray-200">Standard task list</textarea>
+                        <p class="text-sm text-gray-400 italic">Worker ID for this shift: ${currentUserId.substring(0, 8)}... (Self-assigned for prototype)</p>
+                        <button type="submit" class="w-full bg-blue-700 text-white font-bold py-2 rounded-lg shadow-lg hover:bg-blue-800 transition duration-150">
+                            Schedule Shift
+                        </button>
+                        <p id="job-message" class="text-center text-sm text-green-500 font-semibold hidden"></p>
+                    </form>
+                </div>
+            `;
+        };
+
+        const attachJobFormListener = () => {
+            const form = document.getElementById('job-creation-form');
+            if (!form) return;
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const btn = form.querySelector('button[type="submit"]');
+                const messageEl = document.getElementById('job-message');
+                btn.disabled = true;
+                btn.textContent = 'Submitting...';
+                messageEl.classList.add('hidden');
+
+                const formData = new FormData(form);
+                const jobData = {
+                    name: formData.get('name'),
+                    client: formData.get('client'),
+                    shiftDate: formData.get('shiftDate'),
+                    shiftTime: formData.get('shiftTime'),
+                    description: formData.get('description'),
+                    workerId: currentUserId,
+                    status: 'Scheduled',
+                    chatRoomId: `chat_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+                    createdAt: serverTimestamp(),
+                };
+
+                try {
+                    await addDoc(collection(db, DB_PATHS.PUBLIC_JOBS), jobData);
+                    messageEl.textContent = 'Job successfully created!';
+                    messageEl.classList.remove('hidden');
+                    form.reset();
+                } catch (e) {
+                    console.error("Error adding document: ", e);
+                    messageEl.textContent = 'Failed to create job.';
+                    messageEl.classList.remove('hidden');
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Schedule Shift';
+                }
+            });
+        };
+
+        const renderScheduleView = (contentArea) => {
+            const jobsHtml = jobsData.map(renderJobCard).join('');
+            
+            contentArea.innerHTML = `
+                <div class="p-4 bg-gray-800 rounded-lg shadow-inner">
+                    <h2 class="text-2xl font-bold mb-4 text-white">
+                        🗓️ ${isUserWorker ? 'My Upcoming Shifts' : 'Job Information Log & Schedules'}
+                    </h2>
+                    
+                    ${renderJobCreationForm()}
+
+                    <div class="mt-8 space-y-6">
+                        ${jobsData.length === 0 ? '<p class="text-gray-500 italic">No shifts found.</p>' : jobsHtml}
+                    </div>
+                </div>
+            `;
+            attachJobFormListener();
+        };
+
+        // --- 2. NOTES VIEW ---
+
+        const renderNotesView = async (contentArea) => {
+            contentArea.innerHTML = `
+                <div class="flex flex-col h-full bg-gray-800 p-4 rounded-lg shadow-inner">
+                    <h2 class="text-2xl font-bold mb-4 text-white">✍️ My Notes</h2>
+                    <textarea id="notes-textarea" class="flex-grow w-full border border-gray-600 rounded-md p-4 text-gray-200 bg-gray-700 text-lg leading-relaxed focus:ring-blue-500 focus:border-blue-500 outline-none resize-none" placeholder="Start writing your thoughts here..."></textarea>
+                    <p id="notes-status" class="text-sm text-right text-gray-400 mt-2">Loading...</p>
+                </div>
+            `;
+
+            const textarea = document.getElementById('notes-textarea');
+            const statusEl = document.getElementById('notes-status');
+            const docRef = doc(db, DB_PATHS.PRIVATE_NOTES(currentUserId), 'main');
+
+            const loadNote = async () => {
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    textarea.value = docSnap.data().content || '';
+                }
+                statusEl.textContent = 'Ready to save.';
+            };
+            await loadNote();
+
+            let saveTimeout;
+            textarea.addEventListener('input', () => {
+                statusEl.textContent = 'Typing...';
+                clearTimeout(saveTimeout);
+                
+                saveTimeout = setTimeout(async () => {
+                    statusEl.textContent = 'Saving...';
+                    try {
+                        await setDoc(docRef, { 
+                            content: textarea.value, 
+                            lastUpdated: serverTimestamp() 
+                        }, { merge: true });
+                        statusEl.textContent = 'Saved to Cloud.';
+                    } catch (e) {
+                        console.error("Error saving note: ", e);
+                        statusEl.textContent = 'Save Failed!';
+                    }
+                }, 1000);
+            });
+        };
+
+        // --- 3. CHECKLIST VIEW ---
+
+        const renderChecklistView = async (contentArea) => {
+            const itemsDocRef = doc(db, DB_PATHS.PRIVATE_CHECKLIST(currentUserId), 'items');
+
+            contentArea.innerHTML = `
+                <div class="p-4 bg-gray-800 rounded-lg shadow-inner">
+                    <h2 class="text-2xl font-bold mb-6 text-white">✅ Daily Checklist</h2>
+
+                    <form id="checklist-form" class="mb-6 flex gap-2">
+                        <input type="text" id="new-item-text" placeholder="Add a new duty..." class="flex-grow border border-gray-600 rounded-md p-2 focus:border-blue-500 focus:ring-blue-500 bg-gray-700 text-gray-200">
+                        <button type="submit" class="bg-blue-600 text-white font-semibold px-4 py-2 rounded-md shadow hover:bg-blue-700 transition duration-150">Add</button>
+                    </form>
+
+                    <ul id="checklist-items" class="space-y-3">
+                        <p class="text-gray-500 italic">Loading checklist...</p>
+                    </ul>
+                </div>
+            `;
+            
+            const itemsList = document.getElementById('checklist-items');
+            
+            const updateChecklist = async (newItems) => {
+                try {
+                    await setDoc(itemsDocRef, { items: newItems }, { merge: true });
+                } catch (e) {
+                    console.error("Error updating checklist: ", e);
+                }
+            };
+            
+            // Real-time listener for checklist items
+            onSnapshot(itemsDocRef, (docSnap) => {
+                let items = [];
+                if (docSnap.exists()) {
+                    items = docSnap.data().items || [];
+                }
+
+                itemsList.innerHTML = items.length === 0 
+                    ? '<p class="text-gray-500 italic">No duties loaded.</p>' 
+                    : items.map(item => `
+                        <li class="flex items-center justify-between p-2 transition duration-150 rounded-md hover:bg-gray-700">
+                            <div class="flex items-center">
+                                <input type="checkbox" id="item-${item.id}" ${item.completed ? 'checked' : ''} 
+                                    onchange="window.toggleChecklistItem(${item.id}, this.checked)"
+                                    class="h-5 w-5 text-blue-600 border-gray-500 rounded focus:ring-blue-500 cursor-pointer bg-gray-700">
+                                <span class="ml-3 text-lg text-gray-200 ${item.completed ? 'line-through text-gray-500 italic' : ''}">
+                                    ${item.text}
+                                </span>
+                            </div>
+                            <button onclick="window.deleteChecklistItem(${item.id})" class="text-gray-400 hover:text-red-500 p-1 rounded-full transition-colors" aria-label="Delete item">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </li>
+                    `).join('');
+
+                window.toggleChecklistItem = (id, completed) => {
+                    const updatedItems = items.map(item =>
+                        item.id === id ? { ...item, completed: completed } : item
+                    );
+                    updateChecklist(updatedItems);
+                };
+
+                window.deleteChecklistItem = (id) => {
+                    const updatedItems = items.filter(item => item.id !== id);
+                    updateChecklist(updatedItems);
+                };
+            }, (error) => console.error("Error listening to checklist:", error));
+            
+            // Add new item listener
+            document.getElementById('checklist-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const inputEl = document.getElementById('new-item-text');
+                const text = inputEl.value.trim();
+                
+                if (text === '') return;
+                
+                // Get current items snapshot (or load from global state if you want)
+                const docSnap = await getDoc(itemsDocRef);
+                let items = docSnap.exists() ? docSnap.data().items || [] : [];
+
+                const newItem = {
+                    id: Date.now(),
+                    text: text,
+                    completed: false,
+                };
+                items.push(newItem);
+                await updateChecklist(items);
+                inputEl.value = '';
+            });
+        };
+
+        // --- 4. CHAT VIEW ---
+
+        window.backFromChat = () => {
+            selectedJob = null;
+            currentView = 'schedule';
+            sessionStorage.removeItem('selectedJob');
+            renderContent();
+        };
+
+        const renderChatView = (contentArea) => {
+            // Static structure for chat
+            contentArea.innerHTML = `
+                <div class="flex flex-col h-full bg-gray-700 rounded-lg shadow-inner">
+                    <div class="p-4 border-b border-gray-600 bg-gray-900 flex justify-between items-center sticky top-0 z-20">
+                        <button onclick="window.backFromChat()" class="text-blue-500 hover:text-blue-400 font-semibold flex items-center transition">
+                            <svg class="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                            Back
+                        </button>
+                        <div class="text-center flex-grow mx-4">
+                            <h2 class="text-xl font-bold text-white truncate leading-tight">💬 ${selectedJob.name} Chat</h2>
+                            <p class="text-xs text-gray-400">Job ID: ${selectedJob.id.substring(0, 8)}...</p>
+                        </div>
+                        <span id="tts-loading" class="text-sm text-gray-400 animate-pulse hidden">🔊 Loading...</span>
+                    </div>
+
+                    <!-- Message Area -->
+                    <div id="messages-area" class="flex-grow p-4 space-y-4 overflow-y-auto custom-scroll">
+                        <!-- Messages loaded via listener -->
+                    </div>
+
+                    <!-- Input Area -->
+                    <div class="p-4 border-t border-gray-700 bg-gray-900 sticky bottom-0 z-20">
+                        <form id="chat-form" class="flex gap-3">
+                            <input id="chat-input" type="text" placeholder="Message team members..." class="flex-grow p-3 border border-gray-600 rounded-full focus:ring-blue-500 focus:border-blue-500 bg-gray-700 text-gray-200 shadow-inner">
+                            <button type="submit" class="bg-blue-700 text-white font-bold px-5 py-2 rounded-full shadow-lg hover:bg-blue-800 transition duration-150">Send</button>
+                        </form>
+                    </div>
+                </div>
+            `;
+
+            const messagesArea = document.getElementById('messages-area');
+            const chatRef = collection(db, DB_PATHS.CHAT_MESSAGES(selectedJob.id));
+            const q = query(chatRef, orderBy('timestamp'));
+
+            // Real-time listener for messages
+            onSnapshot(q, (snapshot) => {
+                const messages = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data(),
+                    timestamp: doc.data().timestamp?.toDate(),
+                }));
+                
+                messagesArea.innerHTML = messages.map(msg => {
+                    const isMine = msg.senderId === currentUserId;
+                    const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Sending...';
+                    const initials = getInitials(msg.senderName);
+
+                    return `
+                        <div class="flex ${isMine ? 'justify-end' : 'justify-start'}">
+                            
+                            ${!isMine ? `
+                                <div class="w-8 h-8 rounded-full bg-blue-700 text-white flex items-center justify-center text-xs font-bold shadow-md mr-2 flex-shrink-0 self-start mt-1">
+                                    ${initials}
+                                </div>
+                            ` : ''}
+
+                            <div class="flex flex-col max-w-xs sm:max-w-md ${isMine ? 'items-end' : 'items-start'}">
+                                ${!isMine ? `<p class="text-xs font-semibold text-gray-300 mb-1">${msg.senderName}</p>` : ''}
+                                <div class="p-3 rounded-2xl shadow-lg cursor-pointer transition-transform hover:scale-[1.01] ${
+                                    isMine 
+                                        ? 'bg-blue-600 text-white rounded-br-md' 
+                                        : 'bg-gray-800 text-gray-200 rounded-tl-md'
+                                }">
+                                    <p class="text-base break-words">${msg.text}</p>
+                                </div>
+                                <p class="text-right text-xs mt-1 text-gray-400">${time}</p>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                // Scroll to bottom
+                messagesArea.scrollTop = messagesArea.scrollHeight;
+            }, (error) => console.error("Error listening to messages:", error));
+
+            // Message submission
+            document.getElementById('chat-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const inputEl = document.getElementById('chat-input');
+                const text = inputEl.value.trim();
+                
+                if (text === '') return;
+
+                try {
+                    await addDoc(chatRef, {
+                        text: text,
+                        senderId: currentUserId,
+                        senderName: currentDisplayName,
+                        timestamp: serverTimestamp(),
+                    });
+                    inputEl.value = '';
+                } catch (e) {
+                    console.error("Error sending message: ", e);
+                }
+            });
+        };
+
+
+        // --- FIREBASE INITIALIZATION & MAIN FLOW ---
+
+        if (Object.keys(firebaseConfig).length > 0) {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            // Auth listener
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    currentUserId = user.uid;
+                    isUserWorker = !initialAuthToken; // Set role based on auth token existence
+                    currentDisplayName = isUserWorker ? 'Worker' : 'Admin';
+                    
+                    // Start Jobs Listener (Public Data)
+                    const jobsColRef = collection(db, DB_PATHS.PUBLIC_JOBS);
+                    const q = query(jobsColRef, orderBy('shiftDate', 'desc'));
+
+                    onSnapshot(q, (snapshot) => {
+                        jobsData = snapshot.docs.map(doc => ({
+                            id: doc.id,
+                            ...doc.data()
+                        }));
+                        renderApp();
+                    }, (error) => console.error("Error listening to jobs:", error)); // This is the corrected listener
+
+                } else {
+                    console.warn("User not authenticated.");
+                }
+            });
+
+            // Sign in process
+            const handleAuth = async () => {
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Auth failed:", error);
+                }
+            };
+            handleAuth();
+
+        } else {
+            console.error("Firebase config is missing, cannot run app.");
+            document.getElementById('loading-screen').innerHTML = '<p class="text-red-500">ERROR: Firebase config missing.</p>';
+        }
+
+    </script>
+</body>
+</html>
